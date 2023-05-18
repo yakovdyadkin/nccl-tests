@@ -85,9 +85,11 @@ testResult_t AllReduceRunTest(struct threadArgs* args, int root, ncclDataType_t 
     run_opnames = test_opnames;
   }
 
-  for (int i=0; i<type_count; i++) {
-    for (int j=0; j<op_count; j++) {
-      TESTCHECK(TimeTest(args, run_types[i], run_typenames[i], run_ops[j], run_opnames[j], -1));
+  while (1) {
+    for (int i=0; i<type_count; i++) {
+      for (int j=0; j<op_count; j++) {
+        TESTCHECK(TimeTest(args, run_types[i], run_typenames[i], run_ops[j], run_opnames[j], -1));
+      }
     }
   }
   return testSuccess;

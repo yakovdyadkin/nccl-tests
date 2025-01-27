@@ -69,6 +69,7 @@ static int datacheck = 1;
 static int warmup_iters = 5;
 static int iters = 20;
 static int agg_iters = 1;
+static int run_cycles = 1;
 static int ncclop = ncclSum;
 static int nccltype = ncclFloat;
 static int ncclroot = 0;
@@ -80,6 +81,9 @@ static int cudaGraphLaunches = 0;
 static int report_cputime = 0;
 // Report average iteration time: (0=RANK0,1=AVG,2=MIN,3=MAX)
 static int average = 1;
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+static int local_register = 0;
+#endif
 
 #define NUM_BLOCKS 32
 
@@ -487,7 +491,7 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
   int64_t wrongElts = 0;
   static __thread int rep = 0;
   rep++;
-  if (datacheck) {
+  for (int c = 0; c < datacheck; c++) {
       // Initialize sendbuffs, recvbuffs and expected
       TESTCHECK(args->collTest->initData(args, type, op, root, rep, in_place));
 
@@ -536,8 +540,10 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
 
       //aggregate delta from all threads and procs
       long long wrongElts1 = wrongElts;
+      //if (wrongElts) fprintf(stderr, "\nERROR: Data corruption : rank %d size %ld wrongElts %ld\n", args->proc, args->expectedBytes, wrongElts);
       Allreduce(args, &wrongElts1, /*sum*/4);
       wrongElts = wrongElts1;
+      if (wrongElts) break;
   }
 
   double timeUsec = (report_cputime ? cputimeSec : deltaSec)*1.0E6;
@@ -565,7 +571,7 @@ void setupArgs(size_t size, ncclDataType_t type, struct threadArgs* args) {
   size_t count, sendCount, recvCount, paramCount, sendInplaceOffset, recvInplaceOffset;
 
   count = size / wordSize(type);
-  args->collTest->getCollByteCount(&sendCount, &recvCount, &paramCount, &sendInplaceOffset, &recvInplaceOffset, (size_t)count, (size_t)nranks);
+  args->collTest->getCollByteCount(&sendCount, &recvCount, &paramCount, &sendInplaceOffset, &recvInplaceOffset, (size_t)count, wordSize(type), (size_t)nranks);
 
   args->nbytes = paramCount * wordSize(type);
   args->sendBytes = sendCount * wordSize(type);
@@ -593,7 +599,9 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
   TESTCHECK(completeColl(args));
 
   // Benchmark
-  for (size_t size = args->minbytes; size<=args->maxbytes; size = ((args->stepfactor > 1) ? size*args->stepfactor : size+args->stepbytes)) {
+  long repeat = run_cycles;
+  do {
+    for (size_t size = args->minbytes; size<=args->maxbytes; size = ((args->stepfactor > 1) ? size*args->stepfactor : size+args->stepbytes)) {
       setupArgs(size, type, args);
       char rootName[100];
       time_t t;
@@ -608,7 +616,9 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
       TESTCHECK(BenchTime(args, type, op, root, 0));
       TESTCHECK(BenchTime(args, type, op, root, 1));
       PRINT("\n");
-  }
+    }
+  } while (--repeat);
+
   return testSuccess;
 }
 
@@ -636,10 +646,22 @@ testResult_t threadInit(struct threadArgs* args) {
     NCCLCHECK(ncclCommInitRank(args->comms+i, nranks, args->ncclId, rank));
   }
   NCCLCHECK(ncclGroupEnd());
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+  void **sendRegHandles = (local_register) ? (void **)malloc(sizeof(*sendRegHandles)*args->nGpus) : NULL;
+  void **recvRegHandles = (local_register) ? (void **)malloc(sizeof(*recvRegHandles)*args->nGpus) : NULL;
+  for (int i=0; i<args->nGpus; i++) {
+    if (local_register) NCCLCHECK(ncclCommRegister(args->comms[i], args->sendbuffs[i], args->maxbytes, &sendRegHandles[i]));
+    if (local_register) NCCLCHECK(ncclCommRegister(args->comms[i], args->recvbuffs[i], args->maxbytes, &recvRegHandles[i]));
+  }
+#endif
 
   TESTCHECK(threadRunTests(args));
 
   for (int i=0; i<args->nGpus; i++) {
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+    if (local_register) NCCLCHECK(ncclCommDeregister(args->comms[i], sendRegHandles[i]));
+    if (local_register) NCCLCHECK(ncclCommDeregister(args->comms[i], recvRegHandles[i]));
+#endif
     NCCLCHECK(ncclCommDestroy(args->comms[i]));
   }
   return testSuccess;
@@ -656,9 +678,15 @@ testResult_t threadLaunch(struct testThread* thread) {
 }
 
 testResult_t AllocateBuffs(void **sendbuff, size_t sendBytes, void **recvbuff, size_t recvBytes, void **expected, size_t nbytes) {
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+    NCCLCHECK(ncclMemAlloc(sendbuff, nbytes));
+    NCCLCHECK(ncclMemAlloc(recvbuff, nbytes));
+    if (datacheck) NCCLCHECK(ncclMemAlloc(expected, recvBytes));
+#else
     CUDACHECK(cudaMalloc(sendbuff, nbytes));
     CUDACHECK(cudaMalloc(recvbuff, nbytes));
     if (datacheck) CUDACHECK(cudaMalloc(expected, recvBytes));
+#endif
     return testSuccess;
 }
 
@@ -701,6 +729,7 @@ int main(int argc, char* argv[]) {
     {"iters", required_argument, 0, 'n'},
     {"agg_iters", required_argument, 0, 'm'},
     {"warmup_iters", required_argument, 0, 'w'},
+    {"run_cycles", required_argument, 0, 'N'},
     {"parallel_init", required_argument, 0, 'p'},
     {"check", required_argument, 0, 'c'},
     {"op", required_argument, 0, 'o'},
@@ -712,13 +741,14 @@ int main(int argc, char* argv[]) {
     {"cudagraph", required_argument, 0, 'G'},
     {"report_cputime", required_argument, 0, 'C'},
     {"average", required_argument, 0, 'a'},
+    {"local_register", required_argument, 0, 'R'},
     {"help", no_argument, 0, 'h'},
     {}
   };
 
   while(1) {
     int c;
-    c = getopt_long(argc, argv, "t:g:b:e:i:f:n:m:w:p:c:o:d:r:z:y:T:hG:C:a:", longopts, &longindex);
+    c = getopt_long(argc, argv, "t:g:b:e:i:f:n:m:w:N:p:c:o:d:r:z:y:T:hG:C:a:R:", longopts, &longindex);
 
     if (c == -1)
       break;
@@ -747,7 +777,12 @@ int main(int argc, char* argv[]) {
         maxBytes = (size_t)parsed;
         break;
       case 'i':
-        stepBytes = strtol(optarg, NULL, 0);
+        parsed = parsesize(optarg);
+        if (parsed < 0) {
+          fprintf(stderr, "invalid size specified for 'stepBytes'\n");
+          return -1;
+        }
+        stepBytes = (size_t)parsed;
         break;
       case 'f':
         stepFactor = strtol(optarg, NULL, 0);
@@ -764,6 +799,9 @@ int main(int argc, char* argv[]) {
         break;
       case 'w':
         warmup_iters = (int)strtol(optarg, NULL, 0);
+        break;
+      case 'N':
+        run_cycles = (int)strtol(optarg, NULL, 0);
         break;
       case 'c':
         datacheck = (int)strtol(optarg, NULL, 0);
@@ -802,6 +840,15 @@ int main(int argc, char* argv[]) {
       case 'a':
         average = (int)strtol(optarg, NULL, 0);
         break;
+      case 'R':
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+        if ((int)strtol(optarg, NULL, 0)) {
+          local_register = 1;
+        }
+#else
+        printf("Option -R (register) is not supported before NCCL 2.19. Ignoring\n");
+#endif
+        break;
       case 'h':
       default:
         if (c != 'h') printf("invalid option '%c'\n", c);
@@ -815,8 +862,9 @@ int main(int argc, char* argv[]) {
             "[-n,--iters <iteration count>] \n\t"
             "[-m,--agg_iters <aggregated iteration count>] \n\t"
             "[-w,--warmup_iters <warmup iteration count>] \n\t"
+            "[-N,--run_cycles <cycle count> run & print each cycle (default: 1; 0=infinite)] \n\t"
             "[-p,--parallel_init <0/1>] \n\t"
-            "[-c,--check <0/1>] \n\t"
+            "[-c,--check <check iteration count>] \n\t"
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,11,0)
             "[-o,--op <sum/prod/min/max/avg/mulsum/all>] \n\t"
 #elif NCCL_VERSION_CODE >= NCCL_VERSION(2,10,0)
@@ -832,6 +880,7 @@ int main(int argc, char* argv[]) {
             "[-G,--cudagraph <num graph launches>] \n\t"
             "[-C,--report_cputime <0/1>] \n\t"
             "[-a,--average <0/1/2/3> report average iteration time <0=RANK0/1=AVG/2=MIN/3=MAX>] \n\t"
+            "[-R,--local_register <1/0> enable local buffer registration on send/recv buffers (default: disable)] \n\t"
             "[-h,--help]\n",
           basename(argv[0]));
         return 0;
@@ -929,6 +978,7 @@ testResult_t run() {
   }
 #ifdef MPI_SUPPORT
   MPI_Bcast(&ncclId, sizeof(ncclId), MPI_BYTE, 0, mpi_comm);
+  MPI_Barrier(MPI_COMM_WORLD); // Ensure Bcast is complete for HCOLL
 #endif
   int gpus[nGpus*nThreads];
   cudaStream_t streams[nGpus*nThreads];
@@ -953,6 +1003,10 @@ testResult_t run() {
 
   //if parallel init is not selected, use main thread to initialize NCCL
   ncclComm_t* comms = (ncclComm_t*)malloc(sizeof(ncclComm_t)*nThreads*nGpus);
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+  void **sendRegHandles = NULL;
+  void **recvRegHandles = NULL;
+#endif
   if (!parallel_init) {
      if (ncclProcs == 1) {
        NCCLCHECK(ncclCommInitAll(comms, nGpus*nThreads, gpus));
@@ -964,6 +1018,14 @@ testResult_t run() {
        }
        NCCLCHECK(ncclGroupEnd());
      }
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+     sendRegHandles = (local_register) ? (void **)malloc(sizeof(*sendRegHandles)*nThreads*nGpus) : NULL;
+     recvRegHandles = (local_register) ? (void **)malloc(sizeof(*recvRegHandles)*nThreads*nGpus) : NULL;
+     for (int i=0; i<nGpus*nThreads; i++) {
+       if (local_register) NCCLCHECK(ncclCommRegister(comms[i], sendbuffs[i], maxBytes, &sendRegHandles[i]));
+       if (local_register) NCCLCHECK(ncclCommRegister(comms[i], recvbuffs[i], maxBytes, &recvRegHandles[i]));
+     }
+#endif
   }
 
   int errors[nThreads];
@@ -1039,18 +1101,33 @@ testResult_t run() {
 #endif
 
   if (!parallel_init) {
-    for(int i=0; i<nGpus*nThreads; ++i)
+    for(int i=0; i<nGpus*nThreads; ++i) {
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+      if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], sendRegHandles[i]));
+      if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], recvRegHandles[i]));
+#endif
       NCCLCHECK(ncclCommDestroy(comms[i]));
+    }
     free(comms);
   }
 
   // Free off CUDA allocated memory
   for (int i=0; i<nGpus*nThreads; i++) {
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+    if (sendbuffs[i]) NCCLCHECK(ncclMemFree((char*)sendbuffs[i]));
+    if (recvbuffs[i]) NCCLCHECK(ncclMemFree((char*)recvbuffs[i]));
+    if (datacheck) NCCLCHECK(ncclMemFree(expected[i]));
+#else
     if (sendbuffs[i]) CUDACHECK(cudaFree((char*)sendbuffs[i]));
     if (recvbuffs[i]) CUDACHECK(cudaFree((char*)recvbuffs[i]));
     if (datacheck) CUDACHECK(cudaFree(expected[i]));
+#endif
   }
   CUDACHECK(cudaFreeHost(delta));
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
+  free(sendRegHandles);
+  free(recvRegHandles);
+#endif
 
   envstr = getenv("NCCL_TESTS_MIN_BW");
   double check_avg_bw = envstr ? atof(envstr) : -1;
@@ -1060,6 +1137,7 @@ testResult_t run() {
   PRINT("# Avg bus bandwidth    : %g %s\n", bw[0], check_avg_bw == -1 ? "" : (bw[0] < check_avg_bw*(0.9) ? "FAILED" : "OK"));
   PRINT("#\n");
 #ifdef MPI_SUPPORT
+  MPI_Comm_free(&mpi_comm);
   MPI_Finalize();
 #endif
 

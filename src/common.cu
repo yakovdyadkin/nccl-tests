@@ -11,6 +11,7 @@
 #include <getopt.h>
 #include <libgen.h>
 #include "cuda.h"
+#include "time.h"
 
 #include "../verifiable/verifiable.h"
 
@@ -604,8 +605,17 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
     for (size_t size = args->minbytes; size<=args->maxbytes; size = ((args->stepfactor > 1) ? size*args->stepfactor : size+args->stepbytes)) {
       setupArgs(size, type, args);
       char rootName[100];
+      char ts_str[32];
+      timespec ts;
+      struct tm *tm_info;
+
+      clock_gettime(CLOCK_REALTIME, &ts);
+      tm_info = localtime(&(ts.tv_sec));
+      strftime(ts_str, 20, "%Y-%m-%d-%H-%M-%S", tm_info);
+      snprintf(ts_str + strlen(ts_str), 6, ".%04ld", ts.tv_nsec); /* truncate nanoseconds to 4 digits */
+
       sprintf(rootName, "%6i", root);
-      PRINT("%12li  %12li  %8s  %6s  %6s", max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, rootName);
+      PRINT("%s  %12li  %12li  %8s  %6s  %6s", ts_str, max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, rootName);
       TESTCHECK(BenchTime(args, type, op, root, 0));
       TESTCHECK(BenchTime(args, type, op, root, 1));
       PRINT("\n");

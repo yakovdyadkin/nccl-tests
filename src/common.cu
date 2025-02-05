@@ -171,12 +171,13 @@ void Barrier(struct threadArgs *args) {
 // for average=0 (which means broadcast from rank=0) is dubious. The returned
 // value will actually be the result of process-local broadcast from the local thread=0.
 template<typename T>
-void Allreduce(struct threadArgs* args, T* value, int average) {
+void Allreduce(struct threadArgs* args, T* value, int average, bool log) {
   thread_local int epoch = 0;
   static pthread_mutex_t lock[2] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
   static pthread_cond_t cond[2] = {PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER};
   static T accumulator[2];
   static int counter[2] = {0, 0};
+  T *recvbuf = (T*)malloc(sizeof(T) * args->totalProcs);
 
   pthread_mutex_lock(&lock[epoch]);
   if(counter[epoch] == 0) {
@@ -208,11 +209,43 @@ void Allreduce(struct threadArgs* args, T* value, int average) {
                   average == 2 ? MPI_MIN :
                   average == 3 ? MPI_MAX :
                   average == 4 ? MPI_SUM : MPI_Op();
+      MPI_Gather((void*)&accumulator[epoch], 1, ty, recvbuf, 1, ty, 0, MPI_COMM_WORLD);
       MPI_Allreduce(MPI_IN_PLACE, (void*)&accumulator[epoch], 1, ty, op, MPI_COMM_WORLD);
     }
     #endif
 
     if(average == 1) accumulator[epoch] /= args->totalProcs*args->nThreads;
+    /* BEGIN: write accumulator */
+    if( (args->worldproc == 0) && log) {
+      /* Timestamp */
+      char ts_str[32];
+      timespec ts;
+      struct tm *tm_info;
+
+      clock_gettime(CLOCK_REALTIME, &ts);
+      tm_info = localtime(&(ts.tv_sec));
+      strftime(ts_str, 20, "%Y-%m-%d-%H-%M-%S", tm_info);
+      snprintf(ts_str + strlen(ts_str), 6, ".%04ld", ts.tv_nsec);
+
+      /* File */
+      char outdir_path[] = "/home/azhpcuser/yakov";
+      char output_path[PATH_MAX];
+      sprintf(output_path, "%s/allgather_%dprocs.txt", outdir_path, args->totalProcs);
+
+      FILE *fptr;
+      fptr = fopen(output_path,"a");
+      if (fptr) {
+        fprintf(fptr, "ts: %s, ", ts_str);
+        for (int i=0; i < args->totalProcs; i++) {
+          fprintf(fptr, "rank%d: %f, ", i,  recvbuf[i]);
+        }
+        fprintf(fptr, "avg: %f\n", accumulator[epoch]);
+        fclose(fptr);
+      } else {
+        printf("Failed to open output file: %s\n", output_path);
+      }
+    }
+    /* END: write accumulator */
     counter[epoch] = 0;
     pthread_cond_broadcast(&cond[epoch]);
   }
@@ -472,7 +505,7 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
   double deltaSec = tim.elapsed();
   deltaSec = deltaSec/(iters*agg_iters);
   if (cudaGraphLaunches >= 1) deltaSec = deltaSec/cudaGraphLaunches;
-  Allreduce(args, &deltaSec, average);
+  Allreduce(args, &deltaSec, average, true);
 
 #if CUDART_VERSION >= 11030
   if (cudaGraphLaunches >= 1) {
@@ -542,7 +575,7 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
       //aggregate delta from all threads and procs
       long long wrongElts1 = wrongElts;
       //if (wrongElts) fprintf(stderr, "\nERROR: Data corruption : rank %d size %ld wrongElts %ld\n", args->proc, args->expectedBytes, wrongElts);
-      Allreduce(args, &wrongElts1, /*sum*/4);
+      Allreduce(args, &wrongElts1, /*sum*/4, false);
       wrongElts = wrongElts1;
       if (wrongElts) break;
   }
@@ -922,7 +955,7 @@ testResult_t run() {
   char* str = getenv("NCCL_TESTS_SPLIT_MASK");
   uint64_t mask = str ? strtoul(str, NULL, 16) : 0;
   MPI_Comm mpi_comm;
-  color = proc & mask;
+  color = proc % mask;
   MPI_Comm_split(MPI_COMM_WORLD, color, proc, &mpi_comm);
   MPI_Comm_size(mpi_comm, &ncclProcs);
   MPI_Comm_rank(mpi_comm, &ncclProc);
@@ -1062,6 +1095,7 @@ testResult_t run() {
     threads[t].args.localRank = localRank;
 
     threads[t].args.totalProcs=totalProcs;
+    threads[t].args.worldproc=proc;
     threads[t].args.nProcs=ncclProcs;
     threads[t].args.proc=ncclProc;
     threads[t].args.nThreads=nThreads;

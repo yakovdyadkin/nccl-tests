@@ -118,6 +118,7 @@ struct threadArgs {
 
   int totalProcs;
   int nProcs;
+  int worldproc;
   int proc;
   int nThreads;
   int thread;

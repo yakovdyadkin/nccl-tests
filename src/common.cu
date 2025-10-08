@@ -96,6 +96,7 @@ static int streamnull = 0;
 static int timeout = 0;
 static int cudaGraphLaunches = 0;
 static int report_cputime = 0;
+static int report_timestamps = 0;
 static int deviceImpl = 0;
 
 int deviceCtaCount = 16; // Default number of CTAs for device implementation
@@ -646,7 +647,7 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
       setupArgs(size, type, args);
       char rootName[100];
       sprintf(rootName, "%6i", root);
-      if (run_cycles == 0) {
+      if (run_cycles == 0 && report_timestamps == 1) {
         time_t t;
         struct tm *tm_info;
         char ts[26];
@@ -857,6 +858,7 @@ int main(int argc, char* argv[]) {
     {"timeout", required_argument, 0, 'T'},
     {"cudagraph", required_argument, 0, 'G'},
     {"report_cputime", required_argument, 0, 'C'},
+    {"report_timestamps", required_argument, 0, 'S'},
     {"average", required_argument, 0, 'a'},
     {"local_register", required_argument, 0, 'R'},
     {"cta_policy", required_argument, 0, 'x'},
@@ -868,7 +870,7 @@ int main(int argc, char* argv[]) {
 
   while(1) {
     int c;
-    c = getopt_long(argc, argv, "t:g:b:e:i:f:n:m:w:N:p:c:o:d:r:z:y:T:hG:C:a:R:x:D:V:", longopts, &longindex);
+    c = getopt_long(argc, argv, "t:g:b:e:i:f:n:m:w:N:p:c:o:d:r:z:y:T:hG:C:S:a:R:x:D:V:", longopts, &longindex);
 
     if (c == -1)
       break;
@@ -957,6 +959,9 @@ int main(int argc, char* argv[]) {
       case 'C':
         report_cputime = strtol(optarg, NULL, 0);
         break;
+      case 'S':
+        report_timestamps = strtol(optarg, NULL, 0);
+        break;
       case 'a':
         average = (int)strtol(optarg, NULL, 0);
         break;
@@ -1035,6 +1040,7 @@ int main(int argc, char* argv[]) {
             "[-T,--timeout <time in seconds>] \n\t"
             "[-G,--cudagraph <num graph launches>] \n\t"
             "[-C,--report_cputime <0/1>] \n\t"
+            "[-S,--report_timestamps <0/1> report timestamps (default 0; requires -N 0)] \n\t"
             "[-a,--average <0/1/2/3> report average iteration time <0=RANK0/1=AVG/2=MIN/3=MAX>] \n\t"
             "[-R,--local_register <0/1/2> enable local (1) or symmetric (2) buffer registration on send/recv buffers (default: disable (0))] \n\t"
             "[-x,--cta_policy <0/1/2> set CTA policy (NCCL_CTA_POLICY_DEFAULT (0), NCCL_CTA_POLICY_EFFICIENCY (1), NCCL_CTA_POLICY_ZERO (2)) (default: do not set)] \n\t"

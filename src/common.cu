@@ -655,7 +655,7 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
         time(&t);
         tm_info = localtime(&t);
         strftime(ts, 26, "%Y-%m-%d-%H-%M-%S", tm_info);
-        PRINT("%s %12li  %12li  %8s  %6s  %6s", ts, max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, rootName);
+        PRINT("%21s %12li  %12li  %8s  %6s  %6s", ts, max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, rootName);
       }
       else {
         PRINT("%12li  %12li  %8s  %6s  %6s", max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, rootName);
@@ -1364,13 +1364,18 @@ testResult_t run() {
 
   fflush(stdout);
 
+  int tsPad  = report_timestamps ? 19 : 0;
+  int sizePad = report_timestamps ? 13 : 10;
+  const char* tsLbl  = report_timestamps ? "timestamp" : "";
+  const char* tsFmt = report_timestamps ? "%Y-%m-%d-%H-%M-%S" : "";
   const char* timeStr = report_cputime ? "cputime" : "time";
   PRINT("#\n");
-  PRINT("# %10s  %12s  %8s  %6s  %6s           out-of-place                       in-place          \n", "", "", "", "", "");
-  PRINT("# %10s  %12s  %8s  %6s  %6s  %7s  %6s  %6s %6s  %7s  %6s  %6s %6s\n", "size", "count", "type", "redop", "root",
+  PRINT("# %*s%*s  %12s  %8s  %6s  %6s           out-of-place                       in-place          \n", tsPad, "", sizePad, "", "", "", "", "");
+  PRINT("# %*s%*s  %12s  %8s  %6s  %6s  %7s  %6s  %6s %6s  %7s  %6s  %6s %6s\n", tsPad, tsLbl, sizePad, "size", "count", "type", "redop", "root",
       timeStr, "algbw", "busbw", "#wrong", timeStr, "algbw", "busbw", "#wrong");
-  PRINT("# %10s  %12s  %8s  %6s  %6s  %7s  %6s  %6s  %5s  %7s  %6s  %6s  %5s\n", "(B)", "(elements)", "", "", "",
+  PRINT("# %*s%*s  %12s  %8s  %6s  %6s  %7s  %6s  %6s  %5s  %7s  %6s  %6s  %5s\n", tsPad, tsFmt, sizePad, "(B)", "(elements)", "", "", "",
       "(us)", "(GB/s)", "(GB/s)", "", "(us)", "(GB/s)", "(GB/s)", "");
+
 
   struct testThread threads[nThreads];
   memset(threads, 0, sizeof(struct testThread)*nThreads);
